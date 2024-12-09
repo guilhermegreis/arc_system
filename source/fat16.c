@@ -1,4 +1,5 @@
 #include "fat16.h"
+#include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <error.h>
@@ -13,7 +14,15 @@ uint32_t bpb_faddress(struct fat_bpb *bpb)
 /* calculate FAT root address */
 uint32_t bpb_froot_addr(struct fat_bpb *bpb)
 {
-    return bpb_faddress(bpb) + bpb->n_fat * bpb->sect_per_fat * bpb->bytes_p_sect;
+
+    if (bpb->possible_rentries == 0)
+    { // Indicativo de FAT32
+        return bpb_fdata_addr(bpb) + (bpb->root_cluster - 2) * bpb->sector_p_clust * bpb->bytes_p_sect;
+    }
+    else
+    {
+        return bpb_faddress(bpb) + bpb->n_fat * bpb->sect_per_fat * bpb->bytes_p_sect;
+    }
 }
 
 /* calculate data address */
@@ -65,8 +74,11 @@ int read_bytes(FILE *fp, unsigned int offset, void *buff, unsigned int len)
 /* read fat16's bios parameter block */
 void rfat(FILE *fp, struct fat_bpb *bpb)
 {
-
     read_bytes(fp, 0x0, bpb, sizeof(struct fat_bpb));
 
-    return;
+    if (strncmp((char *)bpb->fs_type, "FAT32", 5) != 0)
+    {
+        fprintf(stderr, "Error: Not a FAT32 image.\n");
+        exit(EXIT_FAILURE);
+    }
 }

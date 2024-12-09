@@ -38,23 +38,23 @@ struct fat_dir
  * AKA as the boot sector, reserved sector or even the "0th" sector.
  */
 struct fat_bpb
-{                               /* bios Parameter block */
-    uint8_t jmp_instruction[3]; /* code to jump to the bootstrap code */
-    unsigned char oem_id[8];    /* Oem ID: name of the formatting OS */
-
-    uint16_t bytes_p_sect;      /* bytes per sector */
-    uint8_t sector_p_clust;     /* sector per cluster */
-    uint16_t reserved_sect;     /* reserved sectors */
-    uint8_t n_fat;              /* number of FAT copies */
-    uint16_t possible_rentries; /* number of possible root entries */
-    uint16_t snumber_sect;      /* small number of sectors */
-
-    uint8_t media_desc;       /* media descriptor */
-    uint32_t sect_per_fat;    /* sector per FAT */
-    uint16_t sect_per_track;  /* sector per track */
-    uint16_t number_of_heads; /* number of heads */
-    uint32_t hidden_sects;    /* hidden sectors */
-    uint32_t large_n_sects;   /* large number of sectors */
+{
+    uint8_t jmp_instruction[3]; /* Código para pular o bootstrap */
+    unsigned char oem_id[8];    /* Identificador OEM */
+    uint16_t bytes_p_sect;      /* Bytes por setor */
+    uint8_t sector_p_clust;     /* Setores por cluster */
+    uint16_t reserved_sect;     /* Setores reservados */
+    uint8_t n_fat;              /* Número de FATs */
+    uint16_t possible_rentries; /* Número de entradas no diretório raiz */
+    uint16_t snumber_sect;      /* Número de setores pequenos */
+    uint8_t media_desc;         /* Descritor de mídia */
+    uint16_t sect_per_track;    /* Setores por trilha */
+    uint16_t number_of_heads;   /* Número de cabeças */
+    uint32_t hidden_sects;      /* Setores ocultos */
+    uint32_t large_n_sects;     /* Número de setores grandes */
+    uint32_t sect_per_fat;      /* Setores por FAT */
+    uint32_t root_cluster;      /* Cluster inicial do diretório raiz (FAT32) */
+    char fs_type[8];            /* Tipo do sistema de arquivos (FAT32, FAT16) */
 };
 /*
  * NOTE - Modificação
