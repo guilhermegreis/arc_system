@@ -1,23 +1,32 @@
-CC = gcc
-CFLAGS = -Wall -g
+INCLUDE = include
+SOURCE  = source
+BUILD   = build
 
+CC    = cc
+CARGS = -Wall -Wextra -g -O0 -I$(INCLUDE) -pedantic -std=c11
 
-SRC_DIR = src
-INC_DIR = include
-TEST_DIR = tests
+OBJS    = $(shell find $(SOURCE) -type f -name '*.c' | sed 's/\.c*$$/\.o/; s/$(SOURCE)\//$(BUILD)\//')
+HEADERS = $(shell find $(INCLUDE) -type f -name '*.h')
 
-SRC = $(SRC_DIR)/commands.c $(SRC_DIR)/fat32.c $(SRC_DIR)/main.c $(SRC_DIR)/output.c $(SRC_DIR)/support.c $(TEST_DIR)/fat32_test.c
+NAME = obese16
 
-OBJ = $(SRC:.c=.o)
-EXEC = fat32_program
+.PHONY: builddir
 
-all: $(EXEC)
+all: $(NAME)
 
-$(EXEC): $(OBJ)
-	$(CC) -o $(EXEC) $(OBJ)
+builddir:
+	@if [ ! -d "build" ] ; then mkdir build ; fi
 
-%.o: %.c
-	$(CC) $(CFLAGS) -I$(INC_DIR) -c $< -o $@
+resetimg:
+	@cp -v backup.img disk.img
+
+$(OBJS): $(BUILD)/%.o: $(SOURCE)/%.c $(HEADERS)
+	@$(CC) -c $(CARGS) $< -o $@
+	@echo 'CC   ' $<
 
 clean:
-	rm -f $(OBJ) $(EXEC)
+	@rm -vf $(NAME) $(UBJS) $(OBJS)
+
+$(NAME): builddir $(OBJS)
+	@$(CC) $(CARGS) $(OBJS) -o $@
+	@echo 'CCLD ' $(NAME)
