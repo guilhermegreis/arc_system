@@ -64,7 +64,7 @@ Esta função lê, do `bpb`, o endereço em disco da região de dados.
 ## Auxiliares
 
 ```c
-bool cstr_to_fat16wnull(char *filename, char output[FAT32STR_SIZE_WNULL]);
+bool cstr_to_fat16wnull(char *filename, char output[FAT16STR_SIZE_WNULL]);
 ```
 
 Esta função converte o nome de arquivo `filename` do formato Cstring para o formato

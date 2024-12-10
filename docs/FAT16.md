@@ -13,7 +13,7 @@ O sistema de arquivos FAT16 consiste em quatro regiões distintas:
 
 O setor de boot consiste em um único setor de 512 bytes que contém dois elementos,
 o programa de bootstrap, carregado pela BIOS para iniciar o sistema operacional,
-e o _Bios Parameter Block_. O programa de boot não nos interessa. O BPB contém
+e o *Bios Parameter Block*. O programa de boot não nos interessa. O BPB contém
 as informações do volume FAT16 que iremos operar, então ter acesso à ele é importantíssimo.
 
 Este é o layout em disco do BPB:
@@ -100,7 +100,7 @@ struct fat_dir {
 	uint16_t reserved_fat32;   /* reserved for fat32 */
 	uint16_t last_write_time;  /* time of last write */
 	uint16_t last_write_date;  /* date of last write */
-	uint32_t starting_cluster; /* starting cluster */
+	uint16_t starting_cluster; /* starting cluster */
 	uint32_t file_size;        /* 32-bit */
 };
 ```

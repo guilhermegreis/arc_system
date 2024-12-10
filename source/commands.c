@@ -14,20 +14,6 @@
 
 #include <sys/types.h>
 
-uint32_t get_next_cluster(FILE *fp, uint32_t current_cluster, struct fat_bpb *bpb)
-{
-    uint32_t fat_address = bpb_faddress(bpb);
-    uint32_t entry_address = fat_address + current_cluster * sizeof(uint32_t);
-    uint32_t next_cluster;
-
-    if (read_bytes(fp, entry_address, &next_cluster, sizeof(uint32_t)) == RB_ERROR)
-    {
-        error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "Erro ao ler tabela FAT.");
-    }
-
-    return next_cluster;
-}
-
 /*
  * Função de busca na pasta raíz. Codigo original do professor,
  * altamente modificado.
@@ -35,38 +21,23 @@ uint32_t get_next_cluster(FILE *fp, uint32_t current_cluster, struct fat_bpb *bp
  * Ela itera sobre todas as bpb->possible_rentries do struct fat_dir* dirs, e
  * retorna a primeira entrada com nome igual à filename.
  */
-struct far_dir_searchres find_in_dir(FILE *fp, struct fat_dir *dirs, char *filename, uint32_t start_cluster, struct fat_bpb *bpb)
+
+struct far_dir_searchres find_in_root(struct fat_dir* root, char* filename, struct fat_bpb* bpb)
 {
-    struct far_dir_searchres res = {.found = false};
-    uint32_t cluster_width = bpb->bytes_p_sect * bpb->sector_p_clust;
-    uint32_t cluster_number = start_cluster;
+    struct far_dir_searchres result = { .found = false, .fdir = NULL, .idx = 0 };
 
-    do
+    for (uint32_t i = 0; i < bpb->root_entry_count; i++)
     {
-        uint32_t cluster_address = (cluster_number - 2) * cluster_width + bpb_fdata_addr(bpb);
-        if (read_bytes(fp, cluster_address, dirs, cluster_width) == RB_ERROR)
+        if (strncmp((char*)root[i].name, filename, FAT16STR_SIZE) == 0)
         {
-            error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "Erro ao ler cluster de diretório.");
+            result.found = true;
+            result.fdir = root[i];
+            result.idx = i;
+            break;
         }
+    }
 
-        for (size_t i = 0; i < cluster_width / sizeof(struct fat_dir); i++)
-        {
-            if (dirs[i].name[0] == '\0')
-                continue;
-
-            if (memcmp((char *)dirs[i].name, filename, FAT32STR_SIZE) == 0)
-            {
-                res.found = true;
-                res.fdir = dirs[i];
-                res.idx = i;
-                break;
-            }
-        }
-
-        cluster_number = get_next_cluster(fp, cluster_number, bpb);
-    } while (!res.found && cluster_number < FAT32_EOF);
-
-    return res;
+    return result;
 }
 
 /*
@@ -77,307 +48,372 @@ struct far_dir_searchres find_in_dir(FILE *fp, struct fat_dir *dirs, char *filen
  */
 struct fat_dir *ls(FILE *fp, struct fat_bpb *bpb)
 {
-    uint32_t cluster_width = bpb->bytes_p_sect * bpb->sector_p_clust;
-    uint32_t cluster_number = bpb->root_cluster;
-    struct fat_dir *dirs = malloc(cluster_width);
+    uint32_t root_address = bpb_froot_addr(bpb);
+    uint32_t root_size = sizeof(struct fat_dir) * bpb->root_entry_count;
 
-    printf("ATTR  NAME    SIZE\n------------------\n");
-    do
+    struct fat_dir *dirs = malloc(root_size);
+
+    if (read_bytes(fp, root_address, dirs, root_size) == RB_ERROR)
     {
-        uint32_t cluster_address = (cluster_number - 2) * cluster_width + bpb_fdata_addr(bpb);
-        if (read_bytes(fp, cluster_address, dirs, cluster_width) == RB_ERROR)
-        {
-            error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "Erro ao listar diretório.");
-        }
-
-        for (size_t i = 0; i < cluster_width / sizeof(struct fat_dir); i++)
-        {
-            if (dirs[i].name[0] == '\0')
-                continue;
-
-            printf("0x%02X  %11s  %u\n", dirs[i].attr, dirs[i].name, dirs[i].file_size);
-        }
-
-        cluster_number = get_next_cluster(fp, cluster_number, bpb);
-    } while (cluster_number < FAT32_EOF);
+        error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "erro ao ler struct fat_dir");
+    }
 
     return dirs;
 }
 
-void mv(FILE *fp, char *source, char *dest, struct fat_bpb *bpb)
+void mv(FILE *fp, char *source, char* dest, struct fat_bpb *bpb)
 {
-    char source_rname[FAT32STR_SIZE_WNULL], dest_rname[FAT32STR_SIZE_WNULL];
+    char source_rname[FAT16STR_SIZE_WNULL], dest_rname[FAT16STR_SIZE_WNULL];
 
-    // Converte os nomes
-    if (cstr_to_fat16wnull(source, source_rname) || cstr_to_fat16wnull(dest, dest_rname))
+    // Converte os nomes dos arquivos para o formato FAT16.
+    bool badname = cstr_to_fat16wnull(source, source_rname) || cstr_to_fat16wnull(dest, dest_rname);
+
+    if (badname)
     {
         fprintf(stderr, "Nome de arquivo inválido.\n");
         exit(EXIT_FAILURE);
     }
 
-    struct fat_dir dirs[bpb->bytes_p_sect * bpb->sector_p_clust / sizeof(struct fat_dir)];
-    struct far_dir_searchres dir1 = find_in_dir(fp, dirs, source_rname, bpb->root_cluster, bpb);
-    struct far_dir_searchres dir2 = find_in_dir(fp, dirs, dest_rname, bpb->root_cluster, bpb);
+    // Determina o endereço do diretório raiz e seu tamanho.
+    uint32_t root_address = bpb_froot_addr(bpb);
+    uint32_t root_size = sizeof(struct fat_dir) * bpb->root_entry_count;
 
-    if (dir2.found)
+    // Lê o diretório raiz do disco.
+    struct fat_dir root[root_size];
+    if (read_bytes(fp, root_address, &root, root_size) == RB_ERROR)
     {
-        fprintf(stderr, "Não permitido substituir arquivo %s via mv.\n", dest);
-        exit(EXIT_FAILURE);
+        error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "erro ao ler struct fat_dir");
     }
 
-    if (!dir1.found)
+    // Encontra as entradas do diretório correspondentes aos arquivos source e dest.
+    struct far_dir_searchres dir1 = find_in_root(root, source_rname, bpb);
+    struct far_dir_searchres dir2 = find_in_root(root, dest_rname, bpb);
+
+    // Verifica se o arquivo de destino já existe.
+    if (dir2.found == true)
     {
-        fprintf(stderr, "Arquivo %s não encontrado.\n", source);
-        exit(EXIT_FAILURE);
+        error(EXIT_FAILURE, 0, "Não permitido substituir arquivo %s via mv.", dest);
     }
 
-    // Renomeia
-    memcpy(dir1.fdir.name, dest_rname, FAT32STR_SIZE);
+    // Verifica se o arquivo de origem existe.
+    if (dir1.found == false)
+    {
+        error(EXIT_FAILURE, 0, "Não foi possivel encontrar o arquivo %s.", source);
+    }
 
-    uint32_t cluster_number = bpb->root_cluster;
-    uint32_t cluster_width = bpb->bytes_p_sect * bpb->sector_p_clust;
-    uint32_t cluster_address = (cluster_number - 2) * cluster_width + bpb_fdata_addr(bpb);
+    // Renomeia o arquivo de origem para o nome de destino.
+    memcpy(dir1.fdir.name, dest_rname, sizeof(char) * FAT16STR_SIZE);
 
-    // Atualiza a entrada no disco
-    (void)fseek(fp, cluster_address + dir1.idx * sizeof(struct fat_dir), SEEK_SET);
-    (void)fwrite(&dir1.fdir, sizeof(struct fat_dir), 1, fp);
+    // Calcula o endereço da entrada do diretório a ser atualizada.
+    uint32_t source_address = root_address + dir1.idx * sizeof(struct fat_dir);
+
+    // Escreve a entrada do diretório atualizada de volta no disco.
+    if (fseek(fp, source_address, SEEK_SET) != 0)
+    {
+        error_at_line(EXIT_FAILURE, errno, __FILE__, __LINE__, "erro ao posicionar o ponteiro do arquivo");
+    }
+
+    if (fwrite(&dir1.fdir, sizeof(struct fat_dir), 1, fp) != 1)
+    {
+        error_at_line(EXIT_FAILURE, errno, __FILE__, __LINE__, "erro ao escrever a entrada do diretório");
+    }
 
     printf("mv %s → %s.\n", source, dest);
 }
 
-void rm(FILE *fp, char *filename, struct fat_bpb *bpb)
+void rm(FILE* fp, char* filename, struct fat_bpb* bpb)
 {
-    char fat16_rname[FAT32STR_SIZE_WNULL];
-    uint32_t zero = 0; // Variável zero inicializada
+    char fat16_rname[FAT16STR_SIZE_WNULL];
 
+    // Converte o nome do arquivo para o formato FAT16.
     if (cstr_to_fat16wnull(filename, fat16_rname))
     {
         fprintf(stderr, "Nome de arquivo inválido.\n");
         exit(EXIT_FAILURE);
     }
 
-    struct fat_dir dirs[bpb->bytes_p_sect * bpb->sector_p_clust / sizeof(struct fat_dir)];
-    struct far_dir_searchres dir = find_in_dir(fp, dirs, fat16_rname, bpb->root_cluster, bpb);
+    // Determina o endereço do diretório raiz e seu tamanho.
+    uint32_t root_address = bpb_froot_addr(bpb);
+    uint32_t root_size = sizeof(struct fat_dir) * bpb->root_entry_count;
 
-    if (!dir.found)
+    // Lê o diretório raiz do disco.
+    struct fat_dir root[root_size];
+    if (read_bytes(fp, root_address, &root, root_size) == RB_ERROR)
     {
-        fprintf(stderr, "Arquivo %s não encontrado.\n", filename);
-        exit(EXIT_FAILURE);
+        error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "erro ao ler struct fat_dir");
     }
 
-    // Marca a entrada como livre
+    // Encontra a entrada do diretório correspondente ao arquivo.
+    struct far_dir_searchres dir = find_in_root(&root[0], fat16_rname, bpb);
+
+    // Verifica se o arquivo foi encontrado.
+    if (dir.found == false)
+    {
+        fprintf(stderr, "Arquivo não encontrado.\n");
+        return;
+    }
+
+    // Marca a entrada do diretório como livre.
     dir.fdir.name[0] = DIR_FREE_ENTRY;
 
-    uint32_t cluster_number = bpb->root_cluster;
-    uint32_t cluster_width = bpb->bytes_p_sect * bpb->sector_p_clust;
-    uint32_t cluster_address = (cluster_number - 2) * cluster_width + bpb_fdata_addr(bpb);
+    // Calcula o endereço da entrada do diretório a ser deletada.
+    uint32_t file_address = root_address + dir.idx * sizeof(struct fat_dir);
 
-    // Atualiza o disco
-    (void)fseek(fp, cluster_address + dir.idx * sizeof(struct fat_dir), SEEK_SET);
-    (void)fwrite(&dir.fdir, sizeof(struct fat_dir), 1, fp);
-
-    // Libera os clusters associados
-    uint32_t fat_address = bpb_faddress(bpb);
-    uint32_t cluster = dir.fdir.starting_cluster;
-
-    while (cluster < FAT32_EOF)
+    // Escreve a entrada do diretório de volta no disco.
+    if (fseek(fp, file_address, SEEK_SET) != 0)
     {
-        uint32_t next_cluster;
-        uint32_t entry_address = fat_address + cluster * sizeof(uint32_t);
-
-        (void)read_bytes(fp, entry_address, &next_cluster, sizeof(uint32_t));
-        (void)fseek(fp, entry_address, SEEK_SET);
-        (void)fwrite(&zero, sizeof(uint32_t), 1, fp);
-
-        cluster = next_cluster;
+        error_at_line(EXIT_FAILURE, errno, __FILE__, __LINE__, "erro ao posicionar o ponteiro do arquivo");
     }
 
-    printf("rm %s concluído.\n", filename);
+    if (fwrite(&dir.fdir, sizeof(struct fat_dir), 1, fp) != 1)
+    {
+        error_at_line(EXIT_FAILURE, errno, __FILE__, __LINE__, "erro ao escrever a entrada do diretório");
+    }
+
+    printf("Arquivo %s removido.\n", filename);
 }
 
-struct fat32_newcluster_info fat32_find_free_cluster(FILE *fp, struct fat_bpb *bpb)
+struct fat16_newcluster_info fat16_find_free_cluster(FILE* fp, struct fat_bpb* bpb)
 {
+    uint16_t cluster = 0x0;
     uint32_t fat_address = bpb_faddress(bpb);
     uint32_t total_clusters = bpb_fdata_cluster_count(bpb);
 
-    for (uint32_t cluster = 2; cluster < total_clusters; cluster++)
+    for (cluster = 0x2; cluster < total_clusters; cluster++)
     {
-        uint32_t entry;
-        uint32_t entry_address = fat_address + cluster * sizeof(uint32_t);
+        uint32_t entry_address = fat_address + cluster * sizeof(uint16_t);
+        uint16_t entry;
 
-        if (read_bytes(fp, entry_address, &entry, sizeof(uint32_t)) == RB_ERROR)
+        if (read_bytes(fp, entry_address, &entry, sizeof(uint16_t)) == RB_ERROR)
         {
-            error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "Erro ao verificar cluster livre.");
+            error_at_line(EXIT_FAILURE, errno, __FILE__, __LINE__, "erro ao ler a entrada da FAT");
         }
 
         if (entry == 0x0)
         {
-            return (struct fat32_newcluster_info){.cluster = cluster, .address = entry_address};
+            return (struct fat16_newcluster_info) { .cluster = cluster, .address = entry_address };
         }
     }
 
-    return (struct fat32_newcluster_info){0};
+    return (struct fat16_newcluster_info) { .cluster = 0, .address = 0 };
 }
 
-void cp(FILE *fp, char *source, char *dest, struct fat_bpb *bpb)
+void cp(FILE *fp, char* source, char* dest, struct fat_bpb *bpb)
 {
-    char source_rname[FAT32STR_SIZE_WNULL], dest_rname[FAT32STR_SIZE_WNULL];
+    /* Manipulação de diretório explicado em mv() */
+    char source_rname[FAT16STR_SIZE_WNULL], dest_rname[FAT16STR_SIZE_WNULL];
 
-    // Converte os nomes para o formato FAT32
-    if (cstr_to_fat16wnull(source, source_rname) || cstr_to_fat16wnull(dest, dest_rname))
+    bool badname = cstr_to_fat16wnull(source, source_rname)
+                || cstr_to_fat16wnull(dest,   dest_rname);
+
+    if (badname)
     {
         fprintf(stderr, "Nome de arquivo inválido.\n");
         exit(EXIT_FAILURE);
     }
 
-    struct fat_dir dirs[bpb->bytes_p_sect * bpb->sector_p_clust / sizeof(struct fat_dir)];
+    uint32_t root_address = bpb_froot_addr(bpb);
+    uint32_t root_size = sizeof(struct fat_dir) * bpb->root_entry_count;
 
-    // Localiza o arquivo de origem no diretório raiz
-    struct far_dir_searchres dir1 = find_in_dir(fp, dirs, source_rname, bpb->root_cluster, bpb);
+    struct fat_dir root[root_size];
+
+    if (read_bytes(fp, root_address, &root, root_size) == RB_ERROR)
+        error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "erro ao ler struct fat_dir");
+
+    struct far_dir_searchres dir1 = find_in_root(root, source_rname, bpb);
 
     if (!dir1.found)
-    {
-        fprintf(stderr, "Arquivo %s não encontrado.\n", source);
-        exit(EXIT_FAILURE);
-    }
+        error(EXIT_FAILURE, 0, "Não foi possível encontrar o arquivo %s.", source);
 
-    // Verifica se o arquivo de destino já existe
-    struct far_dir_searchres dir2 = find_in_dir(fp, dirs, dest_rname, bpb->root_cluster, bpb);
-
-    if (dir2.found)
-    {
-        fprintf(stderr, "Arquivo %s já existe. Não permitido sobrescrever.\n", dest);
-        exit(EXIT_FAILURE);
-    }
-
-    // Procura uma entrada livre no diretório
-    bool entry_found = false;
-    uint32_t cluster_number = bpb->root_cluster;
-    uint32_t cluster_width = bpb->bytes_p_sect * bpb->sector_p_clust;
+    if (find_in_root(root, dest_rname, bpb).found)
+        error(EXIT_FAILURE, 0, "Não permitido substituir arquivo %s via cp.", dest);
 
     struct fat_dir new_dir = dir1.fdir;
-    memcpy(new_dir.name, dest_rname, FAT32STR_SIZE);
+    memcpy(new_dir.name, dest_rname, FAT16STR_SIZE);
 
-    do
+    /* Dentry */
+
+    bool dentry_failure = true;
+
+    /* Procura-se uma entrada livre no diretório raiz */
+    for (int i = 0; i < bpb->root_entry_count; i++) if (root[i].name[0] == DIR_FREE_ENTRY || root[i].name[0] == '\0')
     {
-        uint32_t cluster_address = (cluster_number - 2) * cluster_width + bpb_fdata_addr(bpb);
+        /* Então calcula-se seu endereço final */
+        uint32_t dest_address = sizeof (struct fat_dir) * i + root_address;
 
-        if (read_bytes(fp, cluster_address, dirs, cluster_width) == RB_ERROR)
-        {
-            error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "Erro ao acessar o diretório raiz.");
-        }
+        /* Aplica new_dir ao diretório raiz */
+        (void) fseek (fp, dest_address, SEEK_SET);
+        (void) fwrite
+        (
+            &new_dir,
+            sizeof (struct fat_dir),
+            1,
+            fp
+        );
 
-        for (size_t i = 0; i < cluster_width / sizeof(struct fat_dir); i++)
-        {
-            if (dirs[i].name[0] == DIR_FREE_ENTRY || dirs[i].name[0] == '\0')
-            {
-                uint32_t dest_address = cluster_address + i * sizeof(struct fat_dir);
+        dentry_failure = false;
 
-                // Grava a nova entrada no diretório
-                (void)fseek(fp, dest_address, SEEK_SET);
-                (void)fwrite(&new_dir, sizeof(struct fat_dir), 1, fp);
-
-                entry_found = true;
-                break;
-            }
-        }
-
-        cluster_number = get_next_cluster(fp, cluster_number, bpb);
-    } while (!entry_found && cluster_number < FAT32_EOF);
-
-    if (!entry_found)
-    {
-        fprintf(stderr, "Não foi possível encontrar uma entrada livre no diretório.\n");
-        exit(EXIT_FAILURE);
+        break;
     }
 
-    // Alocação de clusters para o arquivo de destino
-    uint32_t fat_address = bpb_faddress(bpb);
-    uint32_t data_start = bpb_fdata_addr(bpb);
-    uint32_t cluster_width_bytes = bpb->bytes_p_sect * bpb->sector_p_clust;
+    if (dentry_failure)
+        error_at_line(EXIT_FAILURE, ENOSPC, __FILE__, __LINE__, "Não foi possivel alocar uma entrada no diretório raiz.");
 
-    uint32_t source_cluster = dir1.fdir.starting_cluster;
-    uint32_t dest_cluster = 0, prev_cluster = FAT32_EOF;
+    /* Agora é necessário alocar os clusters para o novo arquivo. */
 
-    size_t bytes_to_copy = dir1.fdir.file_size;
+    int count = 0;
 
-    while (bytes_to_copy > 0)
+    /* Clusters */
     {
-        struct fat32_newcluster_info new_cluster = fat32_find_free_cluster(fp, bpb);
+        /*
+         * Informações de novo cluster
+         *
+         * É alocado os clusters de trás para frente; o último é alocado primeiro,
+         * primariamente devido a necessidade de seu valor ser FAT16_EOF_HI.
+         */
+        struct fat16_newcluster_info next_cluster,
+                                     prev_cluster = { .cluster = FAT16_EOF_HI };
 
-        if (new_cluster.cluster == 0x0)
+        /* Quantos clusters o arquivo necessita */
+        uint32_t cluster_count = dir1.fdir.file_size / bpb->bytes_p_sect / bpb->sector_p_clust + 1;
+
+        /* Aloca-se os clusters, gravando-os na FAT */
+        while (cluster_count--)
         {
-            fprintf(stderr, "Erro: Não foi possível alocar um novo cluster.\n");
-            exit(EXIT_FAILURE);
+            prev_cluster = next_cluster;
+            next_cluster = fat16_find_free_cluster(fp, bpb); /* Busca-se novo cluster */
+
+            if (next_cluster.cluster == 0x0)
+                error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "Disco cheio (imagem foi corrompida)");
+
+            (void) fseek (fp, next_cluster.address, SEEK_SET);
+            (void) fwrite(&prev_cluster.cluster, sizeof (uint16_t), 1, fp);
+
+            count++;
         }
 
-        if (prev_cluster != FAT32_EOF)
-        {
-            uint32_t prev_cluster_address = fat_address + prev_cluster * sizeof(uint32_t);
-            (void)fseek(fp, prev_cluster_address, SEEK_SET);
-            (void)fwrite(&new_cluster.cluster, sizeof(uint32_t), 1, fp);
-        }
-        else
-        {
-            dest_cluster = new_cluster.cluster;
-        }
-
-        prev_cluster = new_cluster.cluster;
-
-        uint32_t eof_marker = FAT32_EOF;
-        uint32_t final_cluster_address = fat_address + prev_cluster * sizeof(uint32_t);
-        (void)fseek(fp, final_cluster_address, SEEK_SET);
-        (void)fwrite(&eof_marker, sizeof(uint32_t), 1, fp);
+        /* Ao final, o cluster de início é guardado na entrada de diretório. */
+        new_dir.starting_cluster = next_cluster.cluster;
     }
 
-    // Atualiza o cluster final na FAT
-    uint32_t eof_marker = FAT32_EOF;
+    /* Copy */
+    {
+        /* Iteração de clusters explicado em cat() */
+        const uint32_t fat_address       = bpb_faddress(bpb);
+        const uint32_t data_region_start = bpb_fdata_addr(bpb);
+        const uint32_t cluster_width     = bpb->bytes_p_sect * bpb->sector_p_clust;
 
-    uint32_t final_cluster_address = fat_address + prev_cluster * sizeof(uint32_t);
-    (void)fseek(fp, final_cluster_address, SEEK_SET);
-    (void)fwrite(&eof_marker, sizeof(uint32_t), 1, fp);
+        size_t bytes_to_copy = new_dir.file_size;
 
-    // Atualiza o cluster inicial e o tamanho do arquivo no diretório
-    new_dir.starting_cluster = dest_cluster;
-    new_dir.file_size = dir1.fdir.file_size;
+        /* É iterado ambos arquivo fonte e arquivo destino ao mesmo tempo */
 
-    printf("cp %s → %s concluído.\n", source, dest);
+        uint16_t source_cluster_number = dir1.fdir.starting_cluster;
+        uint16_t destin_cluster_number = new_dir.starting_cluster;
+
+        while (bytes_to_copy != 0)
+        {
+            uint32_t source_cluster_address = (source_cluster_number - 2) * cluster_width + data_region_start;
+            uint32_t destin_cluster_address = (destin_cluster_number - 2) * cluster_width + data_region_start;
+
+            size_t copied_in_this_sector = MIN(bytes_to_copy, cluster_width);
+
+            char filedata[cluster_width];
+
+            /* Le-se da fonte e escreve-se no destino. */
+            (void) read_bytes(fp, source_cluster_address, filedata, copied_in_this_sector);
+            (void) fseek     (fp, destin_cluster_address, SEEK_SET);
+            (void) fwrite    (filedata, sizeof (char), copied_in_this_sector, fp);
+
+            bytes_to_copy -= copied_in_this_sector;
+
+            uint32_t source_next_cluster_address = fat_address + source_cluster_number * sizeof (uint16_t);
+            uint32_t destin_next_cluster_address = fat_address + destin_cluster_number * sizeof (uint16_t);
+
+            (void) read_bytes(fp, source_next_cluster_address, &source_cluster_number, sizeof (uint16_t));
+            (void) read_bytes(fp, destin_next_cluster_address, &destin_cluster_number, sizeof (uint16_t));
+        }
+    }
+
+    printf("cp %s → %s, %i clusters copiados.\n", source, dest, count);
+
+    return;
 }
 
-void cat(FILE *fp, char *filename, struct fat_bpb *bpb)
+void cat(FILE* fp, char* filename, struct fat_bpb* bpb)
 {
-    char fat16_rname[FAT32STR_SIZE_WNULL];
+    /*
+     * Leitura do diretório raiz explicado em mv().
+     */
 
-    if (cstr_to_fat16wnull(filename, fat16_rname))
+    char rname[FAT16STR_SIZE_WNULL];
+
+    bool badname = cstr_to_fat16wnull(filename, rname);
+
+    if (badname)
     {
         fprintf(stderr, "Nome de arquivo inválido.\n");
         exit(EXIT_FAILURE);
     }
 
-    struct fat_dir dirs[bpb->bytes_p_sect * bpb->sector_p_clust / sizeof(struct fat_dir)];
-    struct far_dir_searchres dir = find_in_dir(fp, dirs, fat16_rname, bpb->root_cluster, bpb);
+    uint32_t root_address = bpb_froot_addr(bpb);
+    uint32_t root_size    = sizeof (struct fat_dir) * bpb->root_entry_count;
 
-    if (!dir.found)
+    struct fat_dir root[root_size];
+
+    if (read_bytes(fp, root_address, &root, root_size) == RB_ERROR)
+        error_at_line(EXIT_FAILURE, EIO, __FILE__, __LINE__, "erro ao ler struct fat_dir");
+
+    struct far_dir_searchres dir = find_in_root(&root[0], rname, bpb);
+
+    if (dir.found == false)
+        error(EXIT_FAILURE, 0, "Não foi possivel encontrar o %s.", filename);
+
+    /*
+     * Descobre-se quantos bytes o arquivo tem
+     */
+    size_t   bytes_to_read     = dir.fdir.file_size;
+
+    /*
+     * Endereço da região de dados e da tabela de alocação.
+     */
+    uint32_t data_region_start = bpb_fdata_addr(bpb);
+    uint32_t fat_address       = bpb_faddress(bpb);
+
+    /*
+     * O primeiro cluster do arquivo esta guardado na struct fat_dir.
+     */
+    uint16_t cluster_number    = dir.fdir.starting_cluster;
+
+    const uint32_t cluster_width = bpb->bytes_p_sect * bpb->sector_p_clust;
+
+    while (bytes_to_read != 0)
     {
-        fprintf(stderr, "Arquivo %s não encontrado.\n", filename);
-        exit(EXIT_FAILURE);
+        /* read */
+        {
+            /* Onde em disco está o cluster atual */
+            uint32_t cluster_address     = (cluster_number - 2) * cluster_width + data_region_start;
+
+            /* Devemos ler no máximo cluster_width. */
+            size_t read_in_this_sector = MIN(bytes_to_read, cluster_width);
+
+            char filedata[cluster_width];
+
+            /* Lemos o cluster atual */
+            read_bytes(fp, cluster_address, filedata, read_in_this_sector);
+            printf("%.*s", (signed) read_in_this_sector, filedata);
+
+            bytes_to_read -= read_in_this_sector;
+        }
+
+        /*
+         * Calculamos o endereço, na tabela de alocação, de onde está a entrada
+         * que diz qual é o próximo cluster.
+         */
+        uint32_t next_cluster_address = fat_address + cluster_number * sizeof (uint16_t);
+
+        /* Lemos esta entrada, assim descobrindo qual é o próximo cluster. */
+        read_bytes(fp, next_cluster_address, &cluster_number, sizeof (uint16_t));
     }
 
-    uint32_t cluster = dir.fdir.starting_cluster;
-    uint32_t cluster_width = bpb->bytes_p_sect * bpb->sector_p_clust;
-    uint32_t data_start = bpb_fdata_addr(bpb);
-    size_t remaining_bytes = dir.fdir.file_size;
-
-    while (remaining_bytes > 0 && cluster < FAT32_EOF)
-    {
-        uint32_t cluster_address = (cluster - 2) * cluster_width + data_start;
-        size_t bytes_to_read = MIN(remaining_bytes, cluster_width);
-        char buffer[cluster_width];
-
-        read_bytes(fp, cluster_address, buffer, bytes_to_read);
-        fwrite(buffer, 1, bytes_to_read, stdout);
-
-        cluster = get_next_cluster(fp, cluster, bpb);
-        remaining_bytes -= bytes_to_read;
-    }
+    return;
 }
