@@ -8,7 +8,7 @@ CARGS = -Wall -Wextra -g -O0 -I$(INCLUDE) -pedantic -std=c11
 OBJS    = $(shell find $(SOURCE) -type f -name '*.c' | sed 's/\.c*$$/\.o/; s/$(SOURCE)\//$(BUILD)\//')
 HEADERS = $(shell find $(INCLUDE) -type f -name '*.h')
 
-NAME = fat32_tool
+NAME = obese32
 
 .PHONY: builddir
 
@@ -25,7 +25,7 @@ $(OBJS): $(BUILD)/%.o: $(SOURCE)/%.c $(HEADERS)
 	@echo 'CC   ' $<
 
 clean:
-	@rm -vf $(NAME) $(OBJS)
+	@rm -vf $(NAME) $(UBJS) $(OBJS)
 
 $(NAME): builddir $(OBJS)
 	@$(CC) $(CARGS) $(OBJS) -o $@
